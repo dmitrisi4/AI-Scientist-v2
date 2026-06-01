@@ -39,6 +39,19 @@
   .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
+  /* Редактор кода дизайна с кнопкой автогенерации внутри */
+  .code-editor { position: relative; }
+  .code-editor textarea {
+    min-height: 150px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.45; padding-top: 38px;
+  }
+  .gen-btn {
+    position: absolute; top: 8px; right: 8px; width: auto; margin: 0;
+    padding: 5px 12px; font-size: 12px; border-radius: 6px;
+    background: var(--accent); color: #0d1117; font-weight: 600;
+  }
+  .gen-btn:hover { filter: brightness(1.1); }
+
   /* Дерево попыток (= Journal из проекта) */
   .journal { display: flex; flex-direction: column; gap: 10px; }
   .node {
@@ -85,6 +98,19 @@
   <section class="controls">
     <label>Что построить (задача)</label>
     <textarea id="task">Карточка товара: изображение-заглушка, название, цена и кнопка «В корзину». Аккуратные отступы, скругления, тень.</textarea>
+
+    <label>Фреймворк</label>
+    <select id="framework">
+      <option value="react">React (JSX)</option>
+      <option value="vue">Vue 3</option>
+      <option value="vanilla">HTML + CSS (vanilla)</option>
+    </select>
+
+    <label>Код дизайна (можно править вручную)</label>
+    <div class="code-editor">
+      <textarea id="code" placeholder="Здесь появится сгенерированный код… или впишите свой и нажмите «Запустить»."></textarea>
+      <button id="gen" class="gen-btn">✨ Сгенерировать</button>
+    </div>
 
     <label>Провайдер LLM</label>
     <select id="provider">
@@ -212,7 +238,45 @@ function bestNode() {
    Общение через postMessage (= очереди code_inq/result_outq в проекте).
    Таймаут → срываем рендер (= SIGINT/kill в interpreter.py).
 ---------------------------------------------------------------------------- */
-function runInSandbox(code, timeout = 6000) {
+const fw = () => $('framework').value;
+
+// Сборка srcdoc под выбранный фреймворк. Во всех случаях ошибки рендера
+// и таймаут сообщаются наверх через postMessage (= события interpreter.py).
+function buildSrcdoc(code, framework) {
+  const head = `<style>body{margin:0;font-family:system-ui,sans-serif;padding:16px}</style>
+    <script>window.onerror=(m)=>parent.postMessage({type:'error',error:String(m)},'*');<\/script>`;
+  const okPing = `requestAnimationFrame(()=>parent.postMessage({type:'ready'},'*'));`;
+
+  if (framework === 'vue') {
+    return `<!doctype html><html><head>
+      <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"><\/script>${head}</head><body>
+      <div id="root"></div>
+      <script>
+        try { ${code}
+          Vue.createApp(App).mount('#root'); ${okPing}
+        } catch(e){ parent.postMessage({type:'error',error:String(e&&e.stack||e)},'*'); }
+      <\/script></body></html>`;
+  }
+  if (framework === 'vanilla') {
+    // code = готовый HTML-фрагмент с inline <style>/<script>
+    return `<!doctype html><html><head>${head}</head><body>
+      ${code}
+      <script>${okPing}<\/script></body></html>`;
+  }
+  // react (по умолчанию)
+  return `<!doctype html><html><head>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"><\/script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"><\/script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>${head}</head><body>
+    <div id="root"></div>
+    <script type="text/babel" data-presets="react">
+      try { ${code}
+        ReactDOM.createRoot(document.getElementById('root')).render(<App/>); ${okPing}
+      } catch (e) { parent.postMessage({type:'error', error:String(e && e.stack || e)}, '*'); }
+    <\/script></body></html>`;
+}
+
+function runInSandbox(code, framework = fw(), timeout = 8000) {
   return new Promise((resolve) => {
     const iframe = $('stage');
     let settled = false;
@@ -233,29 +297,7 @@ function runInSandbox(code, timeout = 6000) {
     }
 
     window.addEventListener('message', onMessage);
-
-    // srcdoc: React + Babel + код компонента. Ошибки рендера → postMessage наверх.
-    iframe.srcdoc = `<!doctype html><html><head>
-      <script src="https://unpkg.com/react@18/umd/react.production.min.js"><\/script>
-      <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"><\/script>
-      <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
-      <style>body{margin:0;font-family:system-ui,sans-serif;padding:16px}</style>
-      </head><body>
-      <div id="root"></div>
-      <script>
-        window.onerror = (m) => parent.postMessage({type:'error', error:String(m)}, '*');
-      <\/script>
-      <script type="text/babel" data-presets="react">
-        try {
-          ${code}
-          const root = ReactDOM.createRoot(document.getElementById('root'));
-          root.render(<App/>);
-          requestAnimationFrame(() => parent.postMessage({type:'ready'}, '*'));
-        } catch (e) {
-          parent.postMessage({type:'error', error:String(e && e.stack || e)}, '*');
-        }
-      <\/script>
-      </body></html>`;
+    iframe.srcdoc = buildSrcdoc(code, framework);
   });
 }
 
@@ -289,26 +331,30 @@ Score 10 = идеально решает задачу и выглядит акк
 }
 
 // === Операции агента: draft / debug / improve (= parallel_agent.py) ===
-async function genDraft(task) {
-  const sys = `Ты генерируешь ОДИН React-компонент. Правила:
-- Объяви функциональный компонент с именем App.
-- React доступен глобально. НИЧЕГО не импортируй.
-- Только JSX/JS, без markdown-текста вокруг — верни лишь код.
-- Inline-стили через объект style. Без внешних библиотек.`;
+// Контракт кода под каждый фреймворк (что именно должен вернуть LLM).
+const LANG = { react: 'React (JSX)', vue: 'Vue 3', vanilla: 'HTML + CSS' };
+const CONTRACT = {
+  react: 'Объяви функциональный компонент с именем App. React доступен глобально, НИЧЕГО не импортируй. Используй JSX и inline-стили (style={{...}}).',
+  vue: 'Верни объект компонента Vue 3: const App = { template: `...`, setup() { return { ... } } }. Vue доступен глобально (Vue.createApp уже вызывается снаружи). НИЧЕГО не импортируй.',
+  vanilla: 'Верни чистый HTML-фрагмент со встроенным <style> (и при необходимости <script>). Без фреймворков и сборки. Не добавляй <html>/<body> — только содержимое.',
+};
+
+async function genDraft(task, framework = fw()) {
+  const sys = `Ты генерируешь UI на ${LANG[framework]}. ${CONTRACT[framework]} Верни ТОЛЬКО код, без markdown-текста вокруг.`;
   const user = `Задача: ${task}\nСделай простую, но рабочую версию.`;
   return extractCode(await callLLM(sys, user));
 }
 
-async function genDebug(task, parent) {
-  const sys = `Ты исправляешь сломанный React-компонент App. Верни ТОЛЬКО исправленный код, без пояснений.`;
+async function genDebug(task, parent, framework = fw()) {
+  const sys = `Ты исправляешь сломанный UI на ${LANG[framework]}. ${CONTRACT[framework]} Верни ТОЛЬКО исправленный код, без пояснений.`;
   const user = `Задача: ${task}\n\nКод:\n${parent.code}\n\nОшибка при рендере:\n${parent.error}\n\nПочини её.`;
   return extractCode(await callLLM(sys, user));
 }
 
-async function genImprove(task, parent) {
+async function genImprove(task, parent, framework = fw()) {
   const issues = (parent.review?.issues || []).join('; ') || 'улучши вёрстку и доступность';
-  const sys = `Ты улучшаешь рабочий React-компонент App. Верни ТОЛЬКО улучшенный код.`;
-  const user = `Задача: ${task}\n\nТекущий код:\n${parent.code}\n\nЗамечания ревьюера: ${issues}\n\nУлучши компонент, сохранив работоспособность.`;
+  const sys = `Ты улучшаешь рабочий UI на ${LANG[framework]}. ${CONTRACT[framework]} Верни ТОЛЬКО улучшенный код.`;
+  const user = `Задача: ${task}\n\nТекущий код:\n${parent.code}\n\nЗамечания ревьюера: ${issues}\n\nУлучши, сохранив работоспособность.`;
   return extractCode(await callLLM(sys, user));
 }
 
@@ -322,28 +368,34 @@ async function loop() {
   $('reviewPanel').innerHTML = '<span class="meta">Работаю…</span>';
 
   const task = $('task').value;
+  const framework = fw();
   const maxIter = +$('maxIter').value;
   const threshold = +$('threshold').value;
+  const setCode = (c) => { $('code').value = c; };
 
-  // 1. DRAFT — начальная попытка с нуля
+  // 1. DRAFT — стартуем с кода в редакторе (если есть) или генерируем
   let current = addNode({ type: 'draft', parentId: null, status: 'running' });
-  current.code = await genDraft(task);
-  await evaluate(current, task);
+  const seed = $('code').value.trim();
+  current.code = seed || await genDraft(task, framework);
+  setCode(current.code);
+  await evaluate(current, task, framework);
 
   // 2..N — debug при ошибке, иначе improve, пока не достигнут порог
   for (let i = 1; i < maxIter; i++) {
     if (current.status === 'error') {
       // отлаживаем сломанный узел (= _debug)
       const child = addNode({ type: 'debug', parentId: current.id, status: 'running' });
-      child.code = await genDebug(task, current);
-      await evaluate(child, task);
+      child.code = await genDebug(task, current, framework);
+      setCode(child.code);
+      await evaluate(child, task, framework);
       current = child;
     } else {
       if (current.review && current.review.score >= threshold) break; // «готово»
       // улучшаем рабочий узел (= _improve)
       const child = addNode({ type: 'improve', parentId: current.id, status: 'running' });
-      child.code = await genImprove(task, current);
-      await evaluate(child, task);
+      child.code = await genImprove(task, current, framework);
+      setCode(child.code);
+      await evaluate(child, task, framework);
       // если улучшение сломалось — продолжаем от него (попадём в ветку debug)
       current = child;
     }
@@ -352,7 +404,8 @@ async function loop() {
   // Финал: показываем лучший узел (= get_best_node)
   const best = bestNode();
   if (best) {
-    await runInSandbox(best.code);
+    setCode(best.code);
+    await runInSandbox(best.code, framework);
     showReview(best.review, true);
   }
   renderJournal();
@@ -360,8 +413,8 @@ async function loop() {
 }
 
 // Исполнить узел в песочнице + (если ок) провести ревью
-async function evaluate(node, task) {
-  const res = await runInSandbox(node.code);
+async function evaluate(node, task, framework = fw()) {
+  const res = await runInSandbox(node.code, framework);
   if (!res.ok) {
     node.status = 'error';
     node.error = res.error;
@@ -491,7 +544,7 @@ async function openaiVision(prompt, base64) {
 
 // --- Утилиты ---
 function extractCode(text) {
-  const m = text.match(/```(?:jsx?|tsx?|javascript)?\s*([\s\S]*?)```/i);
+  const m = text.match(/```(?:jsx?|tsx?|javascript|html|vue|xml)?\s*([\s\S]*?)```/i);
   return (m ? m[1] : text).trim();
 }
 
@@ -512,18 +565,40 @@ function parseReviewJson(text) {
    improve→ стилизованная версия (высокий score → готово)
 ---------------------------------------------------------------------------- */
 function mockGenerate(userMsg) {
+  // Полноценная история draft→debug→improve есть только для React.
+  // Для Vue/Vanilla mock сразу отдаёт готовый аккуратный сниппет (score 9).
+  if (fw() === 'vue') return '```\n' + MOCK_VUE_NICE + '\n```';
+  if (fw() === 'vanilla') return '```html\n' + MOCK_VANILLA_NICE + '\n```';
+
   const isDebug = /Ошибка при рендере/.test(userMsg);
   const isImprove = /Замечания ревьюера/.test(userMsg);
-
-  if (isDebug) {
-    return '```jsx\n' + MOCK_FIXED + '\n```';
-  }
-  if (isImprove) {
-    return '```jsx\n' + MOCK_NICE + '\n```';
-  }
+  if (isDebug) return '```jsx\n' + MOCK_FIXED + '\n```';
+  if (isImprove) return '```jsx\n' + MOCK_NICE + '\n```';
   // первый draft — со специально внесённой ошибкой (price не определён)
   return '```jsx\n' + MOCK_BUGGY + '\n```';
 }
+
+const MOCK_VUE_NICE = `const App = {
+  setup() { return { price: (1990).toLocaleString('ru') }; },
+  template: \`
+    <div style="width:240px;border:1px solid #eee;border-radius:12px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.1)">
+      <div style="height:140px;background:linear-gradient(135deg,#a5b4fc,#818cf8)"></div>
+      <div style="padding:16px">
+        <h3 style="margin:0 0 4px">Беспроводные наушники</h3>
+        <div style="font-size:20px;font-weight:700;margin:8px 0 12px">{{ price }} ₽</div>
+        <button style="width:100%;padding:10px 0;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer">В корзину</button>
+      </div>
+    </div>\`
+};`;
+
+const MOCK_VANILLA_NICE = `<div style="width:240px;border:1px solid #eee;border-radius:12px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.1);font-family:system-ui">
+  <div style="height:140px;background:linear-gradient(135deg,#a5b4fc,#818cf8)"></div>
+  <div style="padding:16px">
+    <h3 style="margin:0 0 4px">Беспроводные наушники</h3>
+    <div style="font-size:20px;font-weight:700;margin:8px 0 12px">1 990 ₽</div>
+    <button style="width:100%;padding:10px 0;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer">В корзину</button>
+  </div>
+</div>`;
 
 function mockReview(node) {
   if (node.code === MOCK_FIXED || /padding:\s*8/.test(node.code)) {
@@ -585,6 +660,24 @@ $('provider').addEventListener('change', () => {
   $('keyField').style.display = (p === 'claude-cli') ? 'none' : 'block';
   $('keyHint').style.display = (p === 'claude-cli') ? 'none' : 'block';
 });
+// При смене фреймворка очищаем редактор (код несовместим между фреймворками)
+$('framework').addEventListener('change', () => { $('code').value = ''; });
+
+// ✨ Автогенерация кода дизайна в редактор + мгновенный рендер (без полной петли)
+$('gen').addEventListener('click', async () => {
+  const btn = $('gen');
+  btn.disabled = true; btn.textContent = '⏳ Генерирую…';
+  try {
+    const code = await genDraft($('task').value, fw());
+    $('code').value = code;
+    await runInSandbox(code, fw());
+  } catch (err) {
+    $('reviewPanel').innerHTML = `<span class="status bad">Ошибка генерации: ${escapeHtml(err.message)}</span>`;
+  } finally {
+    btn.disabled = false; btn.textContent = '✨ Сгенерировать';
+  }
+});
+
 $('run').addEventListener('click', () => {
   $('run').disabled = true;
   loop().catch(err => {
