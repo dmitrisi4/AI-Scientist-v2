@@ -7,6 +7,9 @@
 
 <!-- Зависимости с CDN: React (для рендера в песочнице), Babel (JSX→JS), html2canvas (скриншот) -->
 <script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<!-- Подсветка синтаксиса в редакторе кода -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
 <style>
   :root {
@@ -39,14 +42,27 @@
   .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
-  /* Редактор кода дизайна с кнопкой автогенерации внутри */
-  .code-editor { position: relative; }
-  .code-editor textarea {
-    min-height: 150px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 12px; line-height: 1.45; padding-top: 38px;
+  /* Редактор кода дизайна: подсвеченный <pre> позади прозрачной <textarea> */
+  .code-editor { position: relative; height: 220px; }
+  .code-editor pre, .code-editor textarea {
+    margin: 0; box-sizing: border-box; width: 100%; height: 100%;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5; tab-size: 2;
+    padding: 38px 10px 8px; border: 1px solid var(--border); border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word; overflow: auto;
   }
+  .code-editor pre {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    background: var(--panel); color: var(--text);
+  }
+  .code-editor pre code { font: inherit; padding: 0; background: none; }
+  .code-editor textarea {
+    position: relative; z-index: 1; resize: none;
+    background: transparent; color: transparent; caret-color: var(--text);
+  }
+  .code-editor textarea::placeholder { color: var(--muted); opacity: 1; }
   .gen-btn {
-    position: absolute; top: 8px; right: 8px; width: auto; margin: 0;
+    position: absolute; top: 8px; right: 8px; width: auto; margin: 0; z-index: 2;
     padding: 5px 12px; font-size: 12px; border-radius: 6px;
     background: var(--accent); color: #0d1117; font-weight: 600;
   }
@@ -108,7 +124,8 @@
 
     <label>Код дизайна (можно править вручную)</label>
     <div class="code-editor">
-      <textarea id="code" placeholder="Здесь появится сгенерированный код… или впишите свой и нажмите «Запустить»."></textarea>
+      <pre id="codeHl" aria-hidden="true"><code></code></pre>
+      <textarea id="code" spellcheck="false" placeholder="Здесь появится сгенерированный код… или впишите свой и нажмите «Запустить»."></textarea>
       <button id="gen" class="gen-btn">✨ Сгенерировать</button>
     </div>
 
@@ -224,6 +241,21 @@ function renderJournal() {
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
+
+// --- Подсветка синтаксиса в редакторе (highlight.js поверх textarea) ---
+function highlightCode() {
+  const ta = $('code');
+  const codeEl = $('codeHl').firstElementChild;
+  const lang = fw() === 'vanilla' ? 'xml' : 'javascript';
+  const text = ta.value + '\n'; // запас, чтобы высота pre совпадала с textarea
+  codeEl.innerHTML = (window.hljs)
+    ? hljs.highlight(text, { language: lang }).value
+    : escapeHtml(text);
+  $('codeHl').scrollTop = ta.scrollTop;
+  $('codeHl').scrollLeft = ta.scrollLeft;
+}
+// Единая точка установки кода: обновляет и значение, и подсветку
+function setEditorCode(c) { $('code').value = c; highlightCode(); }
 
 // === Выбор лучшего узла (аналог get_best_node) ===
 function bestNode() {
@@ -371,7 +403,7 @@ async function loop() {
   const framework = fw();
   const maxIter = +$('maxIter').value;
   const threshold = +$('threshold').value;
-  const setCode = (c) => { $('code').value = c; };
+  const setCode = setEditorCode;
 
   // 1. DRAFT — стартуем с кода в редакторе (если есть) или генерируем
   let current = addNode({ type: 'draft', parentId: null, status: 'running' });
@@ -660,8 +692,15 @@ $('provider').addEventListener('change', () => {
   $('keyField').style.display = (p === 'claude-cli') ? 'none' : 'block';
   $('keyHint').style.display = (p === 'claude-cli') ? 'none' : 'block';
 });
+// Подсветка при ручном вводе и синхронный скролл слоёв
+$('code').addEventListener('input', highlightCode);
+$('code').addEventListener('scroll', () => {
+  $('codeHl').scrollTop = $('code').scrollTop;
+  $('codeHl').scrollLeft = $('code').scrollLeft;
+});
+
 // При смене фреймворка очищаем редактор (код несовместим между фреймворками)
-$('framework').addEventListener('change', () => { $('code').value = ''; });
+$('framework').addEventListener('change', () => setEditorCode(''));
 
 // ✨ Автогенерация кода дизайна в редактор + мгновенный рендер (без полной петли)
 $('gen').addEventListener('click', async () => {
@@ -669,7 +708,7 @@ $('gen').addEventListener('click', async () => {
   btn.disabled = true; btn.textContent = '⏳ Генерирую…';
   try {
     const code = await genDraft($('task').value, fw());
-    $('code').value = code;
+    setEditorCode(code);
     await runInSandbox(code, fw());
   } catch (err) {
     $('reviewPanel').innerHTML = `<span class="status bad">Ошибка генерации: ${escapeHtml(err.message)}</span>`;
