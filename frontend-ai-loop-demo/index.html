@@ -89,13 +89,21 @@
     <label>Провайдер LLM</label>
     <select id="provider">
       <option value="mock">Mock (без ключа — демонстрирует петлю)</option>
+      <option value="claude-cli">Claude CLI (локальный мост — без ключа)</option>
       <option value="anthropic">Anthropic (Claude)</option>
       <option value="openai">OpenAI</option>
     </select>
 
+    <div id="cliNote" style="display:none" class="hint">
+      Без API-ключа: запросы идут через локальный мост, который использует <b>уже авторизованный Claude CLI</b>.
+      Запустите <code>node bridge.mjs</code> и откройте страницу с него (порт 5173).
+    </div>
+
     <div id="apiFields" style="display:none">
-      <label>API-ключ</label>
-      <input id="apiKey" type="password" placeholder="sk-... / вставьте свой ключ" />
+      <div id="keyField">
+        <label>API-ключ</label>
+        <input id="apiKey" type="password" placeholder="sk-... / вставьте свой ключ" />
+      </div>
       <div class="row">
         <div>
           <label>Модель (текст)</label>
@@ -106,7 +114,7 @@
           <input id="visionModel" value="claude-sonnet-4-6" />
         </div>
       </div>
-      <div class="hint">Ключ остаётся в браузере и шлётся только в API провайдера. Запускайте через локальный сервер (<code>npx serve</code>), не из file://, чтобы избежать CORS.</div>
+      <div class="hint" id="keyHint">Ключ остаётся в браузере и шлётся только в API провайдера. Запускайте через локальный сервер (<code>npx serve</code>), не из file://, чтобы избежать CORS.</div>
     </div>
 
     <div class="row">
@@ -381,14 +389,37 @@ function showReview(review, isBest) {
 async function callLLM(system, user) {
   const provider = $('provider').value;
   if (provider === 'mock') return mockGenerate(user);
+  if (provider === 'claude-cli') return cliText(system, user);
   if (provider === 'anthropic') return anthropicText(system, user);
   return openaiText(system, user);
 }
 
 async function callVisionLLM(prompt, base64) {
   const provider = $('provider').value;
+  if (provider === 'claude-cli') return cliVision(prompt, base64);
   if (provider === 'anthropic') return anthropicVision(prompt, base64);
   return openaiVision(prompt, base64);
+}
+
+// --- Claude CLI через локальный мост (bridge.mjs) — без ключа ---
+async function cliText(system, user) {
+  const r = await fetch('/api/llm', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ system, user, model: $('model').value }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j.text;
+}
+
+async function cliVision(prompt, base64) {
+  const r = await fetch('/api/vision', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, image: base64, model: $('visionModel').value }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j.text;
 }
 
 async function anthropicText(system, user) {
@@ -547,7 +578,12 @@ const MOCK_NICE = `function App() {
 
 // --- Подключение UI ---
 $('provider').addEventListener('change', () => {
-  $('apiFields').style.display = $('provider').value === 'mock' ? 'none' : 'block';
+  const p = $('provider').value;
+  $('cliNote').style.display = p === 'claude-cli' ? 'block' : 'none';
+  // Mock не требует настроек; claude-cli показывает только выбор модели (ключ не нужен)
+  $('apiFields').style.display = (p === 'anthropic' || p === 'openai' || p === 'claude-cli') ? 'block' : 'none';
+  $('keyField').style.display = (p === 'claude-cli') ? 'none' : 'block';
+  $('keyHint').style.display = (p === 'claude-cli') ? 'none' : 'block';
 });
 $('run').addEventListener('click', () => {
   $('run').disabled = true;
