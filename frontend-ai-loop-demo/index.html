@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Component Loop — draft → sandbox → review → improve</title>
+
+<!-- Зависимости с CDN: React (для рендера в песочнице), Babel (JSX→JS), html2canvas (скриншот) -->
+<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 0; height: calc(100vh - 70px); }
+  .controls { padding: 16px 20px; border-right: 1px solid var(--border); overflow-y: auto; }
+  .stage { padding: 16px 20px; overflow-y: auto; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+  input, select, textarea {
+    width: 100%; background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  textarea { resize: vertical; min-height: 70px; }
+  button {
+    margin-top: 16px; width: 100%; padding: 10px; border: 0; border-radius: 6px;
+    background: var(--accent); color: #0d1117; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* Дерево попыток (= Journal из проекта) */
+  .journal { display: flex; flex-direction: column; gap: 10px; }
+  .node {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    padding: 12px 14px; position: relative;
+  }
+  .node.draft   { border-left: 3px solid var(--accent); }
+  .node.debug   { border-left: 3px solid var(--bad); }
+  .node.improve { border-left: 3px solid var(--ok); }
+  .node .tag {
+    display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .05em; padding: 2px 8px; border-radius: 999px; background: #21262d;
+  }
+  .node.draft   .tag { color: var(--accent); }
+  .node.debug   .tag { color: var(--bad); }
+  .node.improve .tag { color: var(--ok); }
+  .node .meta { color: var(--muted); font-size: 12px; margin: 6px 0; }
+  .node pre {
+    background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; overflow-x: auto; font-size: 12px; max-height: 160px; margin: 8px 0 0;
+  }
+  .status { font-weight: 600; }
+  .status.ok   { color: var(--ok); }
+  .status.bad  { color: var(--bad); }
+  .status.run  { color: var(--warn); }
+  .preview-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .preview-box { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #fff; }
+  .preview-box h3 { margin: 0; padding: 8px 12px; font-size: 12px; background: var(--panel); color: var(--muted); border-bottom: 1px solid var(--border); }
+  iframe#stage { width: 100%; height: 340px; border: 0; background: #fff; display: block; }
+  .review { font-size: 13px; }
+  .review li { margin: 2px 0; }
+  .score { font-size: 28px; font-weight: 800; }
+  .best { outline: 2px solid var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔁 AI Component Loop</h1>
+  <p>Перенос паттерна AI-Scientist-v2 во фронтенд: <b>draft → исполнение в песочнице → vision-ревью → improve</b>. Лучший узел подсвечивается.</p>
+</header>
+
+<main>
+  <!-- Панель управления -->
+  <section class="controls">
+    <label>Что построить (задача)</label>
+    <textarea id="task">Карточка товара: изображение-заглушка, название, цена и кнопка «В корзину». Аккуратные отступы, скругления, тень.</textarea>
+
+    <label>Провайдер LLM</label>
+    <select id="provider">
+      <option value="mock">Mock (без ключа — демонстрирует петлю)</option>
+      <option value="anthropic">Anthropic (Claude)</option>
+      <option value="openai">OpenAI</option>
+    </select>
+
+    <div id="apiFields" style="display:none">
+      <label>API-ключ</label>
+      <input id="apiKey" type="password" placeholder="sk-... / вставьте свой ключ" />
+      <div class="row">
+        <div>
+          <label>Модель (текст)</label>
+          <input id="model" value="claude-sonnet-4-6" />
+        </div>
+        <div>
+          <label>Модель (vision)</label>
+          <input id="visionModel" value="claude-sonnet-4-6" />
+        </div>
+      </div>
+      <div class="hint">Ключ остаётся в браузере и шлётся только в API провайдера. Запускайте через локальный сервер (<code>npx serve</code>), не из file://, чтобы избежать CORS.</div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Макс. итераций</label>
+        <input id="maxIter" type="number" value="4" min="1" max="8" />
+      </div>
+      <div>
+        <label>Порог «готово»</label>
+        <input id="threshold" type="number" value="8" min="1" max="10" />
+      </div>
+    </div>
+
+    <button id="run">▶ Запустить петлю</button>
+    <div class="hint">Аналогия с проектом: задача → <code>_draft</code>/<code>_debug</code>/<code>_improve</code> (parallel_agent.py), песочница = <code>interpreter.py</code>, vision-ревью = <code>_analyze_plots_with_vlm</code>, выбор лучшего = <code>get_best_node</code>.</div>
+  </section>
+
+  <!-- Сцена: превью + дерево -->
+  <section class="stage">
+    <div class="preview-wrap">
+      <div class="preview-box">
+        <h3>Текущий рендер (песочница, sandboxed iframe)</h3>
+        <iframe id="stage" sandbox="allow-scripts allow-same-origin"></iframe>
+      </div>
+      <div class="preview-box" style="background:var(--panel)">
+        <h3>Vision-ревью последнего узла</h3>
+        <div id="reviewPanel" style="padding:12px" class="review"><span class="meta">Запустите петлю…</span></div>
+      </div>
+    </div>
+
+    <h3 style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.04em">Journal (дерево попыток)</h3>
+    <div id="journal" class="journal"></div>
+  </section>
+</main>
+
+<script>
+/* ============================================================================
+   AI Component Loop — демо паттернов из AI-Scientist-v2 для фронтенда.
+
+   Соответствие модулям оригинального проекта:
+   - Node / Journal            → journal.py
+   - _draft / _debug / _improve→ parallel_agent.py:453-523
+   - Interpreter.run + timeout → interpreter.py (здесь: sandboxed iframe + setTimeout/terminate)
+   - _analyze_plots_with_vlm   → parallel_agent.py:894 (здесь: html2canvas + vision-LLM)
+   - get_best_node             → journal.py:420 (здесь: выбор по score ревью)
+   ========================================================================== */
+
+const $ = (id) => document.getElementById(id);
+
+// --- Journal: список узлов-попыток (как journal.py) ---
+const journal = [];
+
+function addNode(node) {
+  node.id = Math.random().toString(36).slice(2, 8);
+  node.status = node.status || 'pending';
+  journal.push(node);
+  renderJournal();
+  return node;
+}
+
+function renderJournal() {
+  const best = bestNode();
+  $('journal').innerHTML = journal.map(n => {
+    const statusCls = n.status === 'ok' ? 'ok' : n.status === 'error' ? 'bad' : 'run';
+    const isBest = best && best.id === n.id ? 'best' : '';
+    return `
+      <div class="node ${n.type} ${isBest}">
+        <span class="tag">${n.type}</span>
+        ${isBest ? '<span class="tag" style="color:var(--ok)">★ лучший</span>' : ''}
+        <div class="meta">#${n.id} · родитель: ${n.parentId || '—'} ·
+          статус: <span class="status ${statusCls}">${n.status}</span>
+          ${n.review ? ` · score: <b>${n.review.score}/10</b>` : ''}
+        </div>
+        ${n.error ? `<div class="status bad">Ошибка: ${escapeHtml(n.error).slice(0,300)}</div>` : ''}
+        ${n.review ? `<div class="meta">${escapeHtml(n.review.summary)}</div>` : ''}
+        <pre>${escapeHtml(n.code).slice(0, 600)}</pre>
+      </div>`;
+  }).join('');
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+// === Выбор лучшего узла (аналог get_best_node) ===
+function bestNode() {
+  const good = journal.filter(n => n.status === 'ok' && n.review);
+  if (!good.length) return null;
+  return good.reduce((a, b) => (b.review.score > a.review.score ? b : a));
+}
+
+/* ----------------------------------------------------------------------------
+   ПЕСОЧНИЦА ИСПОЛНЕНИЯ (= interpreter.py)
+   Рендерим компонент в sandboxed iframe c жёстким таймаутом.
+   Общение через postMessage (= очереди code_inq/result_outq в проекте).
+   Таймаут → срываем рендер (= SIGINT/kill в interpreter.py).
+---------------------------------------------------------------------------- */
+function runInSandbox(code, timeout = 6000) {
+  return new Promise((resolve) => {
+    const iframe = $('stage');
+    let settled = false;
+
+    const onMessage = (e) => {
+      if (!e.data || (e.data.type !== 'ready' && e.data.type !== 'error')) return;
+      finish(e.data.type === 'ready' ? { ok: true } : { ok: false, error: e.data.error });
+    };
+
+    const timer = setTimeout(() => finish({ ok: false, error: 'TimeoutError: рендер превысил лимит' }), timeout);
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+      resolve(result);
+    }
+
+    window.addEventListener('message', onMessage);
+
+    // srcdoc: React + Babel + код компонента. Ошибки рендера → postMessage наверх.
+    iframe.srcdoc = `<!doctype html><html><head>
+      <script src="https://unpkg.com/react@18/umd/react.production.min.js"><\/script>
+      <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"><\/script>
+      <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
+      <style>body{margin:0;font-family:system-ui,sans-serif;padding:16px}</style>
+      </head><body>
+      <div id="root"></div>
+      <script>
+        window.onerror = (m) => parent.postMessage({type:'error', error:String(m)}, '*');
+      <\/script>
+      <script type="text/babel" data-presets="react">
+        try {
+          ${code}
+          const root = ReactDOM.createRoot(document.getElementById('root'));
+          root.render(<App/>);
+          requestAnimationFrame(() => parent.postMessage({type:'ready'}, '*'));
+        } catch (e) {
+          parent.postMessage({type:'error', error:String(e && e.stack || e)}, '*');
+        }
+      <\/script>
+      </body></html>`;
+  });
+}
+
+/* ----------------------------------------------------------------------------
+   VISION-РЕВЬЮ (= _analyze_plots_with_vlm)
+   Снимаем скриншот iframe (html2canvas) и спрашиваем vision-модель,
+   соответствует ли результат задаче. Возвращаем {score, summary, issues}.
+   В mock-режиме — эвристика без сети.
+---------------------------------------------------------------------------- */
+async function captureScreenshot() {
+  const iframe = $('stage');
+  const doc = iframe.contentDocument;
+  if (!doc || !doc.body) return null;
+  const canvas = await html2canvas(doc.body, { backgroundColor: '#fff', logging: false });
+  return canvas.toDataURL('image/png');
+}
+
+async function visionReview(node, task) {
+  const provider = $('provider').value;
+  if (provider === 'mock') return mockReview(node);
+
+  const dataUrl = await captureScreenshot();
+  const base64 = dataUrl ? dataUrl.split(',')[1] : null;
+  const prompt = `Ты — UI-ревьюер. Задача пользователя: "${task}".
+Оцени отрендеренный компонент на скриншоте. Ответь СТРОГО JSON-объектом:
+{"score": <1-10>, "summary": "<краткий вывод>", "issues": ["<проблема>", ...]}
+Score 10 = идеально решает задачу и выглядит аккуратно. Учитывай вёрстку, отступы, читаемость.`;
+
+  const text = await callVisionLLM(prompt, base64);
+  return parseReviewJson(text);
+}
+
+// === Операции агента: draft / debug / improve (= parallel_agent.py) ===
+async function genDraft(task) {
+  const sys = `Ты генерируешь ОДИН React-компонент. Правила:
+- Объяви функциональный компонент с именем App.
+- React доступен глобально. НИЧЕГО не импортируй.
+- Только JSX/JS, без markdown-текста вокруг — верни лишь код.
+- Inline-стили через объект style. Без внешних библиотек.`;
+  const user = `Задача: ${task}\nСделай простую, но рабочую версию.`;
+  return extractCode(await callLLM(sys, user));
+}
+
+async function genDebug(task, parent) {
+  const sys = `Ты исправляешь сломанный React-компонент App. Верни ТОЛЬКО исправленный код, без пояснений.`;
+  const user = `Задача: ${task}\n\nКод:\n${parent.code}\n\nОшибка при рендере:\n${parent.error}\n\nПочини её.`;
+  return extractCode(await callLLM(sys, user));
+}
+
+async function genImprove(task, parent) {
+  const issues = (parent.review?.issues || []).join('; ') || 'улучши вёрстку и доступность';
+  const sys = `Ты улучшаешь рабочий React-компонент App. Верни ТОЛЬКО улучшенный код.`;
+  const user = `Задача: ${task}\n\nТекущий код:\n${parent.code}\n\nЗамечания ревьюера: ${issues}\n\nУлучши компонент, сохранив работоспособность.`;
+  return extractCode(await callLLM(sys, user));
+}
+
+/* ----------------------------------------------------------------------------
+   ГЛАВНАЯ ПЕТЛЯ (= цикл стадий в agent_manager.py + воркеры parallel_agent.py)
+   draft → исполнить → если ошибка: debug, иначе ревью → improve → повтор.
+---------------------------------------------------------------------------- */
+async function loop() {
+  journal.length = 0;
+  renderJournal();
+  $('reviewPanel').innerHTML = '<span class="meta">Работаю…</span>';
+
+  const task = $('task').value;
+  const maxIter = +$('maxIter').value;
+  const threshold = +$('threshold').value;
+
+  // 1. DRAFT — начальная попытка с нуля
+  let current = addNode({ type: 'draft', parentId: null, status: 'running' });
+  current.code = await genDraft(task);
+  await evaluate(current, task);
+
+  // 2..N — debug при ошибке, иначе improve, пока не достигнут порог
+  for (let i = 1; i < maxIter; i++) {
+    if (current.status === 'error') {
+      // отлаживаем сломанный узел (= _debug)
+      const child = addNode({ type: 'debug', parentId: current.id, status: 'running' });
+      child.code = await genDebug(task, current);
+      await evaluate(child, task);
+      current = child;
+    } else {
+      if (current.review && current.review.score >= threshold) break; // «готово»
+      // улучшаем рабочий узел (= _improve)
+      const child = addNode({ type: 'improve', parentId: current.id, status: 'running' });
+      child.code = await genImprove(task, current);
+      await evaluate(child, task);
+      // если улучшение сломалось — продолжаем от него (попадём в ветку debug)
+      current = child;
+    }
+  }
+
+  // Финал: показываем лучший узел (= get_best_node)
+  const best = bestNode();
+  if (best) {
+    await runInSandbox(best.code);
+    showReview(best.review, true);
+  }
+  renderJournal();
+  $('run').disabled = false;
+}
+
+// Исполнить узел в песочнице + (если ок) провести ревью
+async function evaluate(node, task) {
+  const res = await runInSandbox(node.code);
+  if (!res.ok) {
+    node.status = 'error';
+    node.error = res.error;
+    renderJournal();
+    return;
+  }
+  node.status = 'ok';
+  node.review = await visionReview(node, task);
+  showReview(node.review, false);
+  renderJournal();
+}
+
+function showReview(review, isBest) {
+  if (!review) { $('reviewPanel').innerHTML = '<span class="meta">—</span>'; return; }
+  $('reviewPanel').innerHTML = `
+    <div class="score">${review.score}/10 ${isBest ? '★' : ''}</div>
+    <p>${escapeHtml(review.summary)}</p>
+    ${review.issues?.length ? `<ul>${review.issues.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>` : ''}`;
+}
+
+/* ----------------------------------------------------------------------------
+   LLM-БЭКЕНДЫ: mock / Anthropic / OpenAI (текст и vision).
+   Аналог llm.py / vlm.py — единая обёртка над провайдерами.
+---------------------------------------------------------------------------- */
+async function callLLM(system, user) {
+  const provider = $('provider').value;
+  if (provider === 'mock') return mockGenerate(user);
+  if (provider === 'anthropic') return anthropicText(system, user);
+  return openaiText(system, user);
+}
+
+async function callVisionLLM(prompt, base64) {
+  const provider = $('provider').value;
+  if (provider === 'anthropic') return anthropicVision(prompt, base64);
+  return openaiVision(prompt, base64);
+}
+
+async function anthropicText(system, user) {
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': $('apiKey').value,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: $('model').value, max_tokens: 2000, system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message);
+  return j.content.map(b => b.text).join('');
+}
+
+async function anthropicVision(prompt, base64) {
+  const content = [{ type: 'text', text: prompt }];
+  if (base64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } });
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': $('apiKey').value,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: $('visionModel').value, max_tokens: 1000,
+      messages: [{ role: 'user', content }],
+    }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message);
+  return j.content.map(b => b.text).join('');
+}
+
+async function openaiText(system, user) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${$('apiKey').value}` },
+    body: JSON.stringify({
+      model: $('model').value,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message);
+  return j.choices[0].message.content;
+}
+
+async function openaiVision(prompt, base64) {
+  const content = [{ type: 'text', text: prompt }];
+  if (base64) content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } });
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${$('apiKey').value}` },
+    body: JSON.stringify({ model: $('visionModel').value, messages: [{ role: 'user', content }] }),
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message);
+  return j.choices[0].message.content;
+}
+
+// --- Утилиты ---
+function extractCode(text) {
+  const m = text.match(/```(?:jsx?|tsx?|javascript)?\s*([\s\S]*?)```/i);
+  return (m ? m[1] : text).trim();
+}
+
+function parseReviewJson(text) {
+  try {
+    const m = text.match(/\{[\s\S]*\}/);
+    const o = JSON.parse(m ? m[0] : text);
+    return { score: +o.score || 5, summary: o.summary || '', issues: o.issues || [] };
+  } catch {
+    return { score: 5, summary: 'Не удалось распарсить ответ ревьюера: ' + text.slice(0, 120), issues: [] };
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   MOCK-РЕЖИМ: детерминированно показывает всю петлю без сети.
+   draft  → намеренно сломанный код (ошибка рендера)
+   debug  → починенная, но простая версия (низкий score → improve)
+   improve→ стилизованная версия (высокий score → готово)
+---------------------------------------------------------------------------- */
+function mockGenerate(userMsg) {
+  const isDebug = /Ошибка при рендере/.test(userMsg);
+  const isImprove = /Замечания ревьюера/.test(userMsg);
+
+  if (isDebug) {
+    return '```jsx\n' + MOCK_FIXED + '\n```';
+  }
+  if (isImprove) {
+    return '```jsx\n' + MOCK_NICE + '\n```';
+  }
+  // первый draft — со специально внесённой ошибкой (price не определён)
+  return '```jsx\n' + MOCK_BUGGY + '\n```';
+}
+
+function mockReview(node) {
+  if (node.code === MOCK_FIXED || /padding:\s*8/.test(node.code)) {
+    return { score: 6, summary: 'Работает, но выглядит плоско: нет тени, скромные отступы, кнопка невзрачная.',
+             issues: ['Добавить тень и скругление', 'Увеличить отступы', 'Сделать кнопку заметной'] };
+  }
+  return { score: 9, summary: 'Аккуратная карточка: тень, скругления, акцентная кнопка. Хорошо решает задачу.', issues: [] };
+}
+
+const MOCK_BUGGY = `function App() {
+  return (
+    <div style={{ border: '1px solid #ddd', padding: 8 }}>
+      <div style={{ background:'#eee', height: 120 }} />
+      <h3>Товар</h3>
+      <p>{price} ₽</p>  {/* BUG: price не объявлен → ReferenceError */}
+      <button>В корзину</button>
+    </div>
+  );
+}`;
+
+const MOCK_FIXED = `function App() {
+  const price = 1990;
+  return (
+    <div style={{ border: '1px solid #ddd', padding: 8 }}>
+      <div style={{ background:'#eee', height: 120 }} />
+      <h3>Товар</h3>
+      <p>{price} ₽</p>
+      <button>В корзину</button>
+    </div>
+  );
+}`;
+
+const MOCK_NICE = `function App() {
+  const price = 1990;
+  return (
+    <div style={{
+      width: 240, border: '1px solid #eee', borderRadius: 12, overflow: 'hidden',
+      boxShadow: '0 6px 24px rgba(0,0,0,.10)', fontFamily: 'system-ui'
+    }}>
+      <div style={{ background: 'linear-gradient(135deg,#a5b4fc,#818cf8)', height: 140 }} />
+      <div style={{ padding: 16 }}>
+        <h3 style={{ margin: '0 0 4px' }}>Беспроводные наушники</h3>
+        <div style={{ fontSize: 20, fontWeight: 700, margin: '8px 0 12px' }}>{price.toLocaleString('ru')} ₽</div>
+        <button style={{
+          width: '100%', padding: '10px 0', border: 0, borderRadius: 8,
+          background: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer'
+        }}>В корзину</button>
+      </div>
+    </div>
+  );
+}`;
+
+// --- Подключение UI ---
+$('provider').addEventListener('change', () => {
+  $('apiFields').style.display = $('provider').value === 'mock' ? 'none' : 'block';
+});
+$('run').addEventListener('click', () => {
+  $('run').disabled = true;
+  loop().catch(err => {
+    $('reviewPanel').innerHTML = `<span class="status bad">Ошибка: ${escapeHtml(err.message)}</span>`;
+    $('run').disabled = false;
+  });
+});
+</script>
+</body>
+</html>
