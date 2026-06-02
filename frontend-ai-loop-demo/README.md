@@ -4,7 +4,8 @@
 итеративный агентный цикл **draft → исполнение в песочнице → vision-ревью → improve**,
 с выбором лучшего результата.
 
-Один файл, без сборки: `index.html`.
+Без сборки: UI — `index.html`, мост к Claude CLI — `bridge.mjs`, чистая логика
+(вынесена для тестируемости) — `core.js`.
 
 ## Запуск
 
@@ -104,3 +105,17 @@ npx serve .          # или: python -m http.server 8000
   снимать скриншот на сервере (Playwright), а песочницу держать строже
   (`allow-scripts` без `allow-same-origin`).
 - Это учебное демо. Не исполняйте произвольный недоверенный код без изоляции.
+
+## Тесты
+
+Чистая логика (без DOM) вынесена в `core.js` и покрыта юнит-тестами на встроенном
+раннере Node (`node:test`, без зависимостей и без сборки):
+
+```bash
+npm test          # = node --test
+```
+
+`core.js` подключается обычным `<script>` (работает и с `file://`), а в тестах
+импортируется как CommonJS-модуль — один источник правды для браузера и тестов.
+Покрыто: `extractCode`, `parseReviewJson`, `escapeHtml`, `bestNode`,
+`buildSrcdoc` (react/vue/vanilla) и mock-петля (`mockGenerate`/`mockReview`).

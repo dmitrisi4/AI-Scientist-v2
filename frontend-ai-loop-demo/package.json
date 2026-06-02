@@ -1,0 +1,9 @@
+{
+  "name": "ai-component-loop-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Frontend demo of AI-Scientist-v2 patterns: draft → sandbox → vision review → improve.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

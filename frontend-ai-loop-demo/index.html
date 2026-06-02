@@ -10,6 +10,8 @@
 <!-- Подсветка синтаксиса в редакторе кода -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<!-- Чистая логика (без DOM), общая с юнит-тестами (node:test). Обычный script — работает и с file:// -->
+<script src="core.js"></script>
 
 <style>
   :root {
@@ -207,6 +209,12 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Чистая логика вынесена в core.js (тот же код покрыт юнит-тестами).
+const {
+  escapeHtml, bestNode, buildSrcdoc, extractCode, parseReviewJson,
+  mockGenerate, mockReview,
+} = window.AILoopCore;
+
 // --- Journal: список узлов-попыток (как journal.py) ---
 const journal = [];
 
@@ -219,7 +227,7 @@ function addNode(node) {
 }
 
 function renderJournal() {
-  const best = bestNode();
+  const best = bestNode(journal);
   $('journal').innerHTML = journal.map(n => {
     const statusCls = n.status === 'ok' ? 'ok' : n.status === 'error' ? 'bad' : 'run';
     const isBest = best && best.id === n.id ? 'best' : '';
@@ -238,10 +246,6 @@ function renderJournal() {
   }).join('');
 }
 
-function escapeHtml(s) {
-  return String(s || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-}
-
 // --- Подсветка синтаксиса в редакторе (highlight.js поверх textarea) ---
 function highlightCode() {
   const ta = $('code');
@@ -257,13 +261,6 @@ function highlightCode() {
 // Единая точка установки кода: обновляет и значение, и подсветку
 function setEditorCode(c) { $('code').value = c; highlightCode(); }
 
-// === Выбор лучшего узла (аналог get_best_node) ===
-function bestNode() {
-  const good = journal.filter(n => n.status === 'ok' && n.review);
-  if (!good.length) return null;
-  return good.reduce((a, b) => (b.review.score > a.review.score ? b : a));
-}
-
 /* ----------------------------------------------------------------------------
    ПЕСОЧНИЦА ИСПОЛНЕНИЯ (= interpreter.py)
    Рендерим компонент в sandboxed iframe c жёстким таймаутом.
@@ -272,42 +269,7 @@ function bestNode() {
 ---------------------------------------------------------------------------- */
 const fw = () => $('framework').value;
 
-// Сборка srcdoc под выбранный фреймворк. Во всех случаях ошибки рендера
-// и таймаут сообщаются наверх через postMessage (= события interpreter.py).
-function buildSrcdoc(code, framework) {
-  const head = `<style>body{margin:0;font-family:system-ui,sans-serif;padding:16px}</style>
-    <script>window.onerror=(m)=>parent.postMessage({type:'error',error:String(m)},'*');<\/script>`;
-  const okPing = `requestAnimationFrame(()=>parent.postMessage({type:'ready'},'*'));`;
-
-  if (framework === 'vue') {
-    return `<!doctype html><html><head>
-      <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"><\/script>${head}</head><body>
-      <div id="root"></div>
-      <script>
-        try { ${code}
-          Vue.createApp(App).mount('#root'); ${okPing}
-        } catch(e){ parent.postMessage({type:'error',error:String(e&&e.stack||e)},'*'); }
-      <\/script></body></html>`;
-  }
-  if (framework === 'vanilla') {
-    // code = готовый HTML-фрагмент с inline <style>/<script>
-    return `<!doctype html><html><head>${head}</head><body>
-      ${code}
-      <script>${okPing}<\/script></body></html>`;
-  }
-  // react (по умолчанию)
-  return `<!doctype html><html><head>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"><\/script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"><\/script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>${head}</head><body>
-    <div id="root"></div>
-    <script type="text/babel" data-presets="react">
-      try { ${code}
-        ReactDOM.createRoot(document.getElementById('root')).render(<App/>); ${okPing}
-      } catch (e) { parent.postMessage({type:'error', error:String(e && e.stack || e)}, '*'); }
-    <\/script></body></html>`;
-}
-
+// buildSrcdoc(code, framework) — сборка srcdoc под фреймворк — в core.js (покрыта тестами).
 function runInSandbox(code, framework = fw(), timeout = 8000) {
   return new Promise((resolve) => {
     const iframe = $('stage');
@@ -434,7 +396,7 @@ async function loop() {
   }
 
   // Финал: показываем лучший узел (= get_best_node)
-  const best = bestNode();
+  const best = bestNode(journal);
   if (best) {
     setCode(best.code);
     await runInSandbox(best.code, framework);
@@ -473,7 +435,7 @@ function showReview(review, isBest) {
 ---------------------------------------------------------------------------- */
 async function callLLM(system, user) {
   const provider = $('provider').value;
-  if (provider === 'mock') return mockGenerate(user);
+  if (provider === 'mock') return mockGenerate(user, fw());
   if (provider === 'claude-cli') return cliText(system, user);
   if (provider === 'anthropic') return anthropicText(system, user);
   return openaiText(system, user);
@@ -574,114 +536,8 @@ async function openaiVision(prompt, base64) {
   return j.choices[0].message.content;
 }
 
-// --- Утилиты ---
-function extractCode(text) {
-  const m = text.match(/```(?:jsx?|tsx?|javascript|html|vue|xml)?\s*([\s\S]*?)```/i);
-  return (m ? m[1] : text).trim();
-}
-
-function parseReviewJson(text) {
-  try {
-    const m = text.match(/\{[\s\S]*\}/);
-    const o = JSON.parse(m ? m[0] : text);
-    return { score: +o.score || 5, summary: o.summary || '', issues: o.issues || [] };
-  } catch {
-    return { score: 5, summary: 'Не удалось распарсить ответ ревьюера: ' + text.slice(0, 120), issues: [] };
-  }
-}
-
-/* ----------------------------------------------------------------------------
-   MOCK-РЕЖИМ: детерминированно показывает всю петлю без сети.
-   draft  → намеренно сломанный код (ошибка рендера)
-   debug  → починенная, но простая версия (низкий score → improve)
-   improve→ стилизованная версия (высокий score → готово)
----------------------------------------------------------------------------- */
-function mockGenerate(userMsg) {
-  // Полноценная история draft→debug→improve есть только для React.
-  // Для Vue/Vanilla mock сразу отдаёт готовый аккуратный сниппет (score 9).
-  if (fw() === 'vue') return '```\n' + MOCK_VUE_NICE + '\n```';
-  if (fw() === 'vanilla') return '```html\n' + MOCK_VANILLA_NICE + '\n```';
-
-  const isDebug = /Ошибка при рендере/.test(userMsg);
-  const isImprove = /Замечания ревьюера/.test(userMsg);
-  if (isDebug) return '```jsx\n' + MOCK_FIXED + '\n```';
-  if (isImprove) return '```jsx\n' + MOCK_NICE + '\n```';
-  // первый draft — со специально внесённой ошибкой (price не определён)
-  return '```jsx\n' + MOCK_BUGGY + '\n```';
-}
-
-const MOCK_VUE_NICE = `const App = {
-  setup() { return { price: (1990).toLocaleString('ru') }; },
-  template: \`
-    <div style="width:240px;border:1px solid #eee;border-radius:12px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.1)">
-      <div style="height:140px;background:linear-gradient(135deg,#a5b4fc,#818cf8)"></div>
-      <div style="padding:16px">
-        <h3 style="margin:0 0 4px">Беспроводные наушники</h3>
-        <div style="font-size:20px;font-weight:700;margin:8px 0 12px">{{ price }} ₽</div>
-        <button style="width:100%;padding:10px 0;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer">В корзину</button>
-      </div>
-    </div>\`
-};`;
-
-const MOCK_VANILLA_NICE = `<div style="width:240px;border:1px solid #eee;border-radius:12px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.1);font-family:system-ui">
-  <div style="height:140px;background:linear-gradient(135deg,#a5b4fc,#818cf8)"></div>
-  <div style="padding:16px">
-    <h3 style="margin:0 0 4px">Беспроводные наушники</h3>
-    <div style="font-size:20px;font-weight:700;margin:8px 0 12px">1 990 ₽</div>
-    <button style="width:100%;padding:10px 0;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer">В корзину</button>
-  </div>
-</div>`;
-
-function mockReview(node) {
-  if (node.code === MOCK_FIXED || /padding:\s*8/.test(node.code)) {
-    return { score: 6, summary: 'Работает, но выглядит плоско: нет тени, скромные отступы, кнопка невзрачная.',
-             issues: ['Добавить тень и скругление', 'Увеличить отступы', 'Сделать кнопку заметной'] };
-  }
-  return { score: 9, summary: 'Аккуратная карточка: тень, скругления, акцентная кнопка. Хорошо решает задачу.', issues: [] };
-}
-
-const MOCK_BUGGY = `function App() {
-  return (
-    <div style={{ border: '1px solid #ddd', padding: 8 }}>
-      <div style={{ background:'#eee', height: 120 }} />
-      <h3>Товар</h3>
-      <p>{price} ₽</p>  {/* BUG: price не объявлен → ReferenceError */}
-      <button>В корзину</button>
-    </div>
-  );
-}`;
-
-const MOCK_FIXED = `function App() {
-  const price = 1990;
-  return (
-    <div style={{ border: '1px solid #ddd', padding: 8 }}>
-      <div style={{ background:'#eee', height: 120 }} />
-      <h3>Товар</h3>
-      <p>{price} ₽</p>
-      <button>В корзину</button>
-    </div>
-  );
-}`;
-
-const MOCK_NICE = `function App() {
-  const price = 1990;
-  return (
-    <div style={{
-      width: 240, border: '1px solid #eee', borderRadius: 12, overflow: 'hidden',
-      boxShadow: '0 6px 24px rgba(0,0,0,.10)', fontFamily: 'system-ui'
-    }}>
-      <div style={{ background: 'linear-gradient(135deg,#a5b4fc,#818cf8)', height: 140 }} />
-      <div style={{ padding: 16 }}>
-        <h3 style={{ margin: '0 0 4px' }}>Беспроводные наушники</h3>
-        <div style={{ fontSize: 20, fontWeight: 700, margin: '8px 0 12px' }}>{price.toLocaleString('ru')} ₽</div>
-        <button style={{
-          width: '100%', padding: '10px 0', border: 0, borderRadius: 8,
-          background: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer'
-        }}>В корзину</button>
-      </div>
-    </div>
-  );
-}`;
+// Утилиты extractCode/parseReviewJson и весь MOCK-режим (mockGenerate/mockReview
+// + сниппеты) живут в core.js и покрыты юнит-тестами (node:test).
 
 // --- Подключение UI ---
 $('provider').addEventListener('change', () => {
